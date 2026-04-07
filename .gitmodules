@@ -1,0 +1,9 @@
+[submodule "src/tbx"]
+	path = src/tbx
+	url = git@github.com:jai-toolbox/tbx.git
+[submodule "src/game_logic"]
+	path = src/game_logic
+	url = git@github.com:cjmines/game_logic.git
+[submodule "src/shared"]
+	path = src/shared
+	url = git@github.com:cjmines/shared.git
