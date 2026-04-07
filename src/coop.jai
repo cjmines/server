@@ -12,6 +12,7 @@ Network :: #import "tbx/network";
 #import "Hash_Table";
 #import "String";
 #import "Basic";
+Random :: #import "Random";
 
 // todo next step is to import the game logic and start interacting with that on the server as well.
 
@@ -80,6 +81,8 @@ deinit :: (using coop : *Coop) {
 
 // this runs because someone pressed start game with the given game setup.
 run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
+
+    Random.random_seed(cast(u64) current_time_monotonic().low);
 
     coop : Coop;
     init(*coop);
