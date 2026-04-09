@@ -112,7 +112,13 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
                     log("just sent client id response: %", client_id_response);
 
                 case .DISCONNECT;
+                    log("client with id: % disconnected regularly", event.peer.connect_id);
+                    table_remove(*client_id_to_player, event.peer.connect_id);
+
                 case .DISCONNECT_TIMEOUT;
+                    log("client with id: % disconnected by timeout", event.peer.connect_id);
+                    table_remove(*client_id_to_player, event.peer.connect_id);
+
                 case .RECEIVE;
                     packet_data := cast(*void) event.packet.data;
 
@@ -167,6 +173,7 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
                     if type_of_packet == Infrequent_Coop_Client_Update { 
 
                         // if the type holds dynamic memory then this is a memory leak. use temp allocator for this.
+                        // also note that if we free this then we can no longer slice the username we have to copy because that memory would get invalidated.
                         infrequent_client_update := deserialize_with_type_first(packet_data, Infrequent_Coop_Client_Update);
 
                         // log("just got icu: %", infrequent_client_update);
@@ -221,9 +228,12 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
 
             init(*board, coop_game_settings.board_width, coop_game_settings.board_height, mines);
 
-            log("before");
-            generate_board_with_start(*board, coop_game_settings.no_guess_solvable);
-            log("after");
+            if coop_game_settings.no_guess_solvable {
+                impossible := generate_no_guess_solvable_board(*board);
+                if impossible randomly_place_mines_on_board(*board);
+            } else {
+                randomly_place_mines_on_board(*board);
+            }
 
             pb := Pregenerated_Board.{board.width, board.height, board.safe_start_row, board.safe_start_col, board.cells};
 
