@@ -189,6 +189,11 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
                                     player.ready = false;
                                     continue;
                                 }
+
+                                if begins_with(it, "/initials ") {
+                                    player.initials = slice(it, 10, it.count - 10);
+                                    continue;
+                                }
                                 if begins_with(it, "/username ") {
                                     player.username = slice(it, 10, it.count - 10);
                                     continue;
