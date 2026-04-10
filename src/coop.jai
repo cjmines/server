@@ -233,12 +233,9 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
 
             init(*board, coop_game_settings.board_width, coop_game_settings.board_height, mines);
 
-            log("the board is : %", board);
-
             if coop_game_settings.no_guess_solvable {
-                impossible := generate_no_guess_solvable_board(*board);
-                if impossible {
-                    log("we couldn't generate a ngs board with");
+                able_to_find_one := generate_no_guess_solvable_board(*board);
+                if !able_to_find_one {
                     randomly_place_mines_on_board(*board);
                 }
             } else {
