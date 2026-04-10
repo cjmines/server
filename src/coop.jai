@@ -249,8 +249,6 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
             packet := packet_create(pb, .RELIABLE);
             Network.host_broadcast(host, 0, packet);
 
-            log("just sent out pregenerated board: %", pb);
-
             game_state_timer.duration_sec = 3;
             start(*game_state_timer);
         }
