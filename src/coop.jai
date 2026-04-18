@@ -8,6 +8,7 @@ Network :: #import "tbx/network";
 
 #import "shared";
 #import "game_logic";
+#import "directory_packets";
 
 #import "Hash_Table";
 #import "String";
@@ -30,9 +31,6 @@ Server_Coop_Player :: struct {
 
     multi_open := false;
     multi_flag := false;
-
-    open_tbs := Temporal_Binary_Switch.{state_update_method = .IMMEDIATE};
-    flag_tbs := Temporal_Binary_Switch.{state_update_method = .IMMEDIATE};
 }
 
 
@@ -45,20 +43,26 @@ Coop :: struct {
     game_state : Coop_Game_State;
     game_state_timer : Timer;
 
+    orchestrator : *Network.Peer;
+    connected_to_orchestrator := false;
+
     messages_to_send_out : [..] string;
+
+    sent_pregenerated_board := false;
 
     client_id_to_player : Table(u32, Server_Coop_Player);
 }
 
-init :: (using coop : *Coop) {
-
+init :: (using coop : *Coop, port: u16) {
     register_client_server_structs();
+    register_directory_packet_types();
 
     Network.init();
 
     address : Network.Address;
-    address.host = Network.HOST_ANY;
-    address.port = SERVER_PORT;
+    address.ip = Network.HOST_ANY;
+    // address.port = SERVER_PORT;
+    address.port = port;
 
     success := false;
     host, success = Network.host_create(*address, MAX_CLIENTS, 10, 0, 0);
@@ -76,23 +80,147 @@ deinit :: (using coop : *Coop) {
     Network.deinit();
 }
 
-// this is a "room", the port is how we differentiate between rooms I guess for now.
+
+// todo this can be moved into the network code eventually.
+
+disconnect_all :: (host: *Network.Host, timeout_sec: float32 = 2.0) {
+
+    // request disconnect from all connected peers
+    connected_count: u32 = 0;
+    for * host.peers {
+        if it.state == .CONNECTED {
+            Network.peer_disconnect(it, data = 0);
+            connected_count += 1;
+        }
+    }
+
+    if connected_count == 0 return;
+
+    // service the host until everyone has disconnected or we time out
+    timeout_ms := cast(s64)(timeout_sec * 1000.0);
+    start_time := current_time_monotonic();
+
+    while connected_count > 0 {
+        elapsed_ms := to_milliseconds(current_time_monotonic() - start_time);
+        if elapsed_ms >= timeout_ms break;
+
+        event: Network.Event;
+        // service with a small wait so we don't spin at 100% cpu
+        result := Network.host_service(host, *event, max_time_to_wait_for_events_ms = 100);
+
+        if result > 0 {
+            if event.type == {
+                case .RECEIVE;
+                    // Discard any incoming packets during shutdown
+                    Network.packet_destroy(event.packet);
+
+                case .DISCONNECT; #through;
+                case .DISCONNECT_TIMEOUT;
+                    connected_count -= 1;
+            }
+        }
+    }
+
+    // force-reset any peers that still haven't disconnected
+    for * host.peers {
+        if it.state != .DISCONNECTED {
+            Network.peer_reset(it);
+        }
+    }
+}
+
+generate_board :: (coop_game_settings : Coop_Game_Settings, board : *Board) -> Pregenerated_Board { // the return value is completely stack allocated.
+
+    // generate the board.
+    total := coop_game_settings.board_width * coop_game_settings.board_height;
+    mines := coop_game_settings.mine_count;
+    if mines < 1  mines = 1;
+    if mines >= total  mines = total - 1;
+
+    init(board, coop_game_settings.board_width, coop_game_settings.board_height, mines);
+
+    if coop_game_settings.no_guess_solvable {
+        able_to_find_one := generate_no_guess_solvable_board(board);
+        if !able_to_find_one {
+            randomly_place_mines_on_board(board);
+        }
+    } else {
+        randomly_place_mines_on_board(board);
+    }
+
+    pb := Pregenerated_Board.{board.width, board.height, board.safe_start_row, board.safe_start_col, board.cells};
+
+    return pb;
+}
 
 
 // this runs because someone pressed start game with the given game setup.
-run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
+// need to passs the id of the owning lobby.
+
+run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings, id_of_owning_lobby : u32, port : u16) {
 
     Random.random_seed(cast(u64) current_time_monotonic().low);
 
     coop : Coop;
-    init(*coop);
+    init(*coop, port);
     defer deinit(*coop);
     using coop;
 
+    server_address : string;
+    shutting_down := false;
+
+    run_locally := true;
+
+    pregenerated_board := generate_board(coop_game_settings, *board);
+
+    // send_server_metadata_to_orchestrator_signal := Periodic_Signal.{frequency_hz=1}; // could be even slower than this if need be.
+
+    // we no longer need to connect to the directory server, instead we connect to our orchestrator
+    // and that orchestrator connects to the directory server.
+    // startfold connect to orchestrator
+
+    orchestrator_port :: 7778;
+    // this orchestrator is always on the same computer.
+    server_address = "127.0.0.1";
+
+    address := Network.get_host_ip_address(server_address);
+    address.port = orchestrator_port;
+
+    // it's possible for this to return null.
+    orchestrator = Network.host_request_connect(coop.host, *address, 10, 5);
+
+    event: Network.Event;
+
+    // because the only event we'll receive now is a connect or none event, we can just use an if statement instead of the while.
+
+    if Network.host_service(host, *event, 3000) > 0 {
+        if event.type == .CONNECT {
+            if event.peer == orchestrator {
+                log("connected to orchestrator");
+                connected_to_orchestrator = true;
+                Network.queue_send(orchestrator, 0, packet_create(Server_Started.{id_of_owning_lobby}, .RELIABLE));
+            } else {
+                log("connected to something, but it wasn't the orchestrator");
+            }
+        }
+    }
+
+    if !connected_to_orchestrator {
+        log_error("wasn't able to connect to directory server, not starting the server");
+        return;
+    }
+
+    // endfold connect to orchestrator
+
+
+
+    // for pregame
+    game_state_timer.duration_sec = 3;
+    start(*game_state_timer);
 
     while !looping_program.end_program {
         mark_frame_start(*looping_program);
-        
+
         event: Network.Event;
         while Network.host_service(host, *event, 0) == Network.Result_Status.SUCCESS {
             if event.type == {
@@ -106,10 +234,9 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
                     new_player : Server_Coop_Player;
                     table_add(*client_id_to_player, event.peer.connect_id, new_player);
 
-                    client_id_response := Client_Id_Response.{event.peer.connect_id};
-                    packet := packet_create(client_id_response, .RELIABLE);
-                    Network.peer_queue_packet(event.peer, 0, packet);
-                    log("just sent client id response: %", client_id_response);
+                    Network.queue_send(event.peer, 0, packet_create(Client_Id_Response.{event.peer.connect_id}, .RELIABLE));
+                    Network.queue_send(event.peer, 0, packet_create(pregenerated_board, .RELIABLE));
+                    // log("just sent client id response: %", client_id_response);
 
                 case .DISCONNECT;
                     log("client with id: % disconnected regularly", event.peer.connect_id);
@@ -122,50 +249,52 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
                 case .RECEIVE;
                     packet_data := cast(*void) event.packet.data;
 
-
                     // we can do this because we use the serialize module which defines the protocol.
                     type_of_packet : Type = get_type_out(packet_data);
                     
                     // log("got a packet of type: %", type_of_packet);
 
                     if type_of_packet == Coop_Client_Update {
-                        client_update := deserialize_with_type_first(packet_data, Coop_Client_Update);
+                        coop_client_update := deserialize_with_type_first(packet_data, Coop_Client_Update);
 
                         player := table_find_pointer(*client_id_to_player, event.peer.connect_id);
                         if player != null {
                             // synchronize
-                            player.mouse_grid_space_x = client_update.mouse_grid_space_x;
-                            player.mouse_grid_space_y = client_update.mouse_grid_space_y;
 
-                            set(*player.open_tbs, client_update.open_cell_pressed);
-                            set(*player.flag_tbs, client_update.flag_cell_pressed);
+                            for client_update : coop_client_update.updates {
 
-                            if game_state == .LIVE {
-                                if just_switched_on(player.open_tbs) {
-                                    result := handle_board_action(*board, player.mouse_grid_space_x, player.mouse_grid_space_y, .OPEN, player.multi_open, player.multi_flag);
+                                player.mouse_grid_space_x = client_update.mouse_grid_space_x;
+                                player.mouse_grid_space_y = client_update.mouse_grid_space_y;
 
-                                    if result == .WIN {
-                                        game_state = .WON;
-                                        game_state_timer.duration_sec = 3;
-                                        start(*game_state_timer);
-                                        unready_all_players(*coop);
+                                set(*player.open_tbs, client_update.open_cell_pressed);
+                                set(*player.flag_tbs, client_update.flag_cell_pressed);
+
+                                player.last_processed_client_input_number = client_update.number;
+
+                                if game_state == .LIVE {
+
+                                    if just_switched_on(player.open_tbs) {
+                                        result := handle_board_action(*board, player.mouse_grid_space_x, player.mouse_grid_space_y, .OPEN, player.multi_open, player.multi_flag);
+
+                                        if result == .WIN {
+                                            game_state = .WON;
+                                            game_state_timer.duration_sec = 3;
+                                            start(*game_state_timer);
+                                            unready_all_players(*coop);
+                                        }
+
+                                        if result == .HIT_MINE {
+                                            game_state = .LOST;
+                                            game_state_timer.duration_sec = 3;
+                                            start(*game_state_timer);
+                                            unready_all_players(*coop);
+                                        }
                                     }
 
-                                    if result == .HIT_MINE {
-                                        game_state = .LOST;
-                                        game_state_timer.duration_sec = 3;
-                                        start(*game_state_timer);
-                                        unready_all_players(*coop);
-                                    }
+                                    if just_switched_on(player.flag_tbs)
+                                        handle_board_action(*board, player.mouse_grid_space_x, player.mouse_grid_space_y, .FLAG, player.multi_open, player.multi_flag);
                                 }
-
-                                if just_switched_on(player.flag_tbs)
-                                    handle_board_action(*board, player.mouse_grid_space_x, player.mouse_grid_space_y, .FLAG, player.multi_open, player.multi_flag);
                             }
-
-                            // and then simulate, don't need to above is that I believe.
-                            // process_client_input(client_update);
-
                         }
                         // client_id_to_playerevent.peer.connect_id;
                     }
@@ -217,66 +346,39 @@ run_coop_game_mode :: (coop_game_settings : Coop_Game_Settings = .{}) {
             }
         }
 
-        players_ready := 0;
-        for client_id_to_player { if it.ready then players_ready += 1; }
-
-        // if you're doing multiplayer it always makes sense to start a game with at least 2 players.
-        // if players_ready >= 2 && players_ready == client_id_to_player.count {
-        if players_ready >= 2 && players_ready == client_id_to_player.count && game_state == .READY_UP { // for testing purposes
-            game_state = .PRE_GAME;
-
-            // generate the board.
-            total := coop_game_settings.board_width * coop_game_settings.board_height;
-            mines := cast(s32)(cast(float32) total * coop_game_settings.mine_percentage / 100.0 + 0.5);
-            if mines < 1  mines = 1;
-            if mines >= total  mines = total - 1;
-
-            init(*board, coop_game_settings.board_width, coop_game_settings.board_height, mines);
-
-            if coop_game_settings.no_guess_solvable {
-                able_to_find_one := generate_no_guess_solvable_board(*board);
-                if !able_to_find_one {
-                    randomly_place_mines_on_board(*board);
-                }
-            } else {
-                randomly_place_mines_on_board(*board);
-            }
-
-            pb := Pregenerated_Board.{board.width, board.height, board.safe_start_row, board.safe_start_col, board.cells};
-
-            // uses the memory of the board, which is fine because we're not going to modify it.
-            packet := packet_create(pb, .RELIABLE);
-            Network.host_broadcast(host, 0, packet);
-
-            game_state_timer.duration_sec = 3;
-            start(*game_state_timer);
-        }
 
         if game_state == {
-            case .READY_UP;
             case .PRE_GAME;
                 if time_up(*game_state_timer) game_state = .LIVE;
             case .LIVE;
             case .WON;
-                if time_up(*game_state_timer) game_state = .READY_UP;
+                // if time_up(*game_state_timer) game_state = .READY_UP;
+                if time_up(*game_state_timer) looping_program.end_program = true;
             case .LOST;
-                if time_up(*game_state_timer) game_state = .READY_UP;
+                // if time_up(*game_state_timer) game_state = .READY_UP;
+                if time_up(*game_state_timer) looping_program.end_program = true;
         }
 
-        packet := packet_create(sample_game_update(*coop), .UNRELIABLE_FRAGMENT);
-        Network.host_broadcast(host, 0, packet);
+        Network.queue_broadcast(host, 0, packet_create(sample_game_update(*coop), .UNRELIABLE_FRAGMENT));
 
         // not sure if this should be in the if
         if ready(*infrequent_send_signal) {
             icgu := sample_infrequent_game_update(*coop);
             packet := packet_create(icgu, .RELIABLE);
-            Network.host_broadcast(host, 0, packet);
+            Network.queue_broadcast(host, 0, packet);
             // log("just sent out icgu: %", icgu);
         }
+
+        // if ready(*send_server_metadata_to_orchestrator_signal) {
+        //     Network.queue_send(orchestrator, 0, packet_create(server_metadata, .RELIABLE));
+        // }
 
         sleep_to_maintain_max_fps(*looping_program);
         mark_frame_end(*looping_program);
     }
+
+    disconnect_all(coop.host);
+    log("server just closed");
 }
 
 unready_all_players :: (using coop : *Coop) {

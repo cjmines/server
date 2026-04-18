@@ -7,3 +7,6 @@
 [submodule "src/shared"]
 	path = src/shared
 	url = git@github.com:cjmines/shared.git
+[submodule "src/directory_packets"]
+	path = src/directory_packets
+	url = git@github.com:cjmines/directory_packets.git
